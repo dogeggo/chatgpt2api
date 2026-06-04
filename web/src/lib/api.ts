@@ -70,6 +70,7 @@ type AccountMutationResponse = {
   items: Account[];
   added?: number;
   skipped?: number;
+  replaced?: number;
   removed?: number;
   refreshed?: number;
   relogined?: number;
@@ -773,6 +774,7 @@ export type CPAImportJob = {
   completed: number;
   added: number;
   skipped: number;
+  replaced: number;
   refreshed: number;
   failed: number;
   errors: Array<{ name: string; error: string }>;

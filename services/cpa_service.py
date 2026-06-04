@@ -43,6 +43,7 @@ def _normalize_import_job(raw: object, *, fail_unfinished: bool) -> dict | None:
         "completed": int(raw.get("completed") or 0),
         "added": int(raw.get("added") or 0),
         "skipped": int(raw.get("skipped") or 0),
+        "replaced": int(raw.get("replaced") or 0),
         "refreshed": int(raw.get("refreshed") or 0),
         "failed": int(raw.get("failed") or 0),
         "errors": raw.get("errors") if isinstance(raw.get("errors"), list) else [],
@@ -181,7 +182,7 @@ def list_remote_files(pool: dict) -> list[dict]:
     return items
 
 
-def fetch_remote_access_token(pool: dict, file_name: str) -> tuple[str | None, str | None]:
+def fetch_remote_account_payload(pool: dict, file_name: str) -> tuple[dict | None, str | None]:
     base_url = str(pool.get("base_url") or "").strip()
     secret_key = str(pool.get("secret_key") or "").strip()
     file_name = str(file_name or "").strip()
@@ -206,7 +207,14 @@ def fetch_remote_access_token(pool: dict, file_name: str) -> tuple[str | None, s
     access_token = str(payload.get("access_token") or "").strip()
     if not access_token:
         return None, "missing access_token"
-    return access_token, None
+    account_payload: dict = {"access_token": access_token, "source_type": "codex"}
+    email = str(payload.get("email") or payload.get("account") or payload.get("account_email") or "").strip()
+    plan_type = str(payload.get("plan_type") or payload.get("account_type") or "").strip()
+    if email:
+        account_payload["email"] = email
+    if plan_type:
+        account_payload["plan_type"] = plan_type
+    return account_payload, None
 
 
 class CPAImportService:
@@ -228,6 +236,7 @@ class CPAImportService:
             "completed": 0,
             "added": 0,
             "skipped": 0,
+            "replaced": 0,
             "refreshed": 0,
             "failed": 0,
             "errors": [],
@@ -267,19 +276,19 @@ class CPAImportService:
     def _run_import(self, pool_id: str, pool: dict, names: list[str]) -> None:
         self._update_job(pool_id, status="running")
 
-        tokens: list[str] = []
+        account_payloads: list[dict] = []
         max_workers = min(16, max(1, len(names)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(fetch_remote_access_token, pool, name): name for name in names}
+            future_map = {executor.submit(fetch_remote_account_payload, pool, name): name for name in names}
             for future in as_completed(future_map):
                 file_name = future_map[future]
                 try:
-                    token, error = future.result()
+                    account_payload, error = future.result()
                 except Exception as exc:
-                    token, error = None, str(exc)
+                    account_payload, error = None, str(exc)
 
-                if token:
-                    tokens.append(token)
+                if account_payload:
+                    account_payloads.append(account_payload)
                 else:
                     self._append_error(pool_id, file_name, error or "unknown error")
 
@@ -287,7 +296,7 @@ class CPAImportService:
                 failed = len(current.get("errors") or [])
                 self._update_job(pool_id, completed=int(current.get("completed") or 0) + 1, failed=failed)
 
-        if not tokens:
+        if not account_payloads:
             current = self._config.get_import_job(pool_id) or {}
             self._update_job(
                 pool_id,
@@ -297,7 +306,8 @@ class CPAImportService:
             )
             return
 
-        add_result = account_service.add_accounts(tokens, source_type="codex")
+        tokens = [str(item.get("access_token") or "").strip() for item in account_payloads if str(item.get("access_token") or "").strip()]
+        add_result = account_service.add_account_items(account_payloads)
         refresh_result = account_service.refresh_accounts(tokens)
         current = self._config.get_import_job(pool_id) or {}
         self._update_job(
@@ -306,6 +316,7 @@ class CPAImportService:
             completed=len(names),
             added=int(add_result.get("added") or 0),
             skipped=int(add_result.get("skipped") or 0),
+            replaced=int(add_result.get("replaced") or 0),
             refreshed=int(refresh_result.get("refreshed") or 0),
             failed=len(current.get("errors") or []),
         )

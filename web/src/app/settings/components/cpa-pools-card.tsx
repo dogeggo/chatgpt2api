@@ -141,6 +141,7 @@ export function CPAPoolsCard() {
                         </div>
                         <div className="mt-2 flex flex-wrap gap-2 text-xs text-stone-500">
                           <span>新增 {importJob.added}</span>
+                          <span>替换 {importJob.replaced}</span>
                           <span>跳过 {importJob.skipped}</span>
                           <span>刷新 {importJob.refreshed}</span>
                           <span>失败 {importJob.failed}</span>

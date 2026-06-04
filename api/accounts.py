@@ -234,6 +234,7 @@ def create_router() -> APIRouter:
                 extra_result = account_service.add_accounts(extra_tokens)
                 result["added"] = int(result.get("added") or 0) + int(extra_result.get("added") or 0)
                 result["skipped"] = int(result.get("skipped") or 0) + int(extra_result.get("skipped") or 0)
+                result["replaced"] = int(result.get("replaced") or 0) + int(extra_result.get("replaced") or 0)
         else:
             result = account_service.add_accounts(tokens)
         refresh_result = account_service.refresh_accounts(tokens)

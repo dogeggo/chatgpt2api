@@ -521,6 +521,7 @@ export function Sub2APIConnections() {
                               </div>
                               <div className="mt-2 flex flex-wrap gap-2 text-xs text-stone-500">
                                 <span>新增 {importJob.added}</span>
+                                <span>替换 {importJob.replaced}</span>
                                 <span>跳过 {importJob.skipped}</span>
                                 <span>刷新 {importJob.refreshed}</span>
                                 <span>失败 {importJob.failed}</span>
@@ -542,7 +543,7 @@ export function Sub2APIConnections() {
               <li>输入 Sub2API 地址和管理员账户（或 Admin API Key），保存为一个连接。</li>
               <li>点击某个连接的「同步」会拉取其中 platform=openai 且 type=oauth 的账号列表。</li>
               <li>勾选需要的账号后后端会并发拉取 access_token，自动导入本地号池并刷新状态。</li>
-              <li>仅会读取 sub2api 凭据中的 access_token；refresh_token 等字段不会写入本地。</li>
+              <li>会读取 sub2api 凭据中的 access_token 以及可用的邮箱、套餐信息；refresh_token 等字段不会写入本地。</li>
             </ul>
           </div>
         </CardContent>

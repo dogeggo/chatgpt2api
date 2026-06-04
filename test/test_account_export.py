@@ -113,6 +113,72 @@ class AccountExportTests(unittest.TestCase):
         self.assertEqual(account["refresh_token"], "rt_test")
         self.assertEqual(account["account_id"], "acct_123")
 
+    def test_add_account_items_replaces_existing_account_with_same_email(self) -> None:
+        service = AccountService(
+            MemoryStorage(
+                [
+                    {
+                        "access_token": "old_token",
+                        "email": "user@example.com",
+                        "type": "Plus",
+                        "quota": 3,
+                    }
+                ]
+            )
+        )
+
+        result = service.add_account_items(
+            [
+                {
+                    "access_token": "new_token",
+                    "email": "USER@example.com",
+                    "refresh_token": "rt_new",
+                }
+            ]
+        )
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["replaced"], 1)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(service.list_tokens(), ["new_token"])
+        self.assertEqual(service.get_account("old_token")["access_token"], "new_token")
+        self.assertEqual(service.get_account("new_token")["type"], "Plus")
+        self.assertEqual(service.get_account("new_token")["refresh_token"], "rt_new")
+
+    def test_add_accounts_replaces_same_email_from_access_token_claim(self) -> None:
+        old_token = make_jwt(
+            {
+                "https://api.openai.com/profile": {"email": "claim@example.com"},
+            }
+        )
+        new_token = make_jwt(
+            {
+                "https://api.openai.com/profile": {"email": "CLAIM@example.com"},
+            }
+        )
+        service = AccountService(MemoryStorage([{"access_token": old_token}]))
+
+        result = service.add_accounts([new_token])
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["replaced"], 1)
+        self.assertEqual(service.list_tokens(), [new_token])
+        self.assertEqual(service.get_account(new_token)["email"], "CLAIM@example.com")
+
+    def test_add_account_items_deduplicates_incoming_accounts_by_email(self) -> None:
+        service = AccountService(MemoryStorage())
+
+        result = service.add_account_items(
+            [
+                {"access_token": "first_token", "email": "same@example.com"},
+                {"access_token": "second_token", "email": "SAME@example.com"},
+            ]
+        )
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["replaced"], 0)
+        self.assertEqual(service.list_tokens(), ["second_token"])
+
 
 if __name__ == "__main__":
     unittest.main()

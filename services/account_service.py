@@ -171,6 +171,27 @@ class AccountService:
         return str(value or "web").strip().lower() or "web"
 
     @staticmethod
+    def _normalize_email_key(value: object) -> str:
+        return str(value or "").strip().casefold()
+
+    @classmethod
+    def _extract_account_email(cls, item: dict) -> str:
+        raw_email = str(item.get("email") or "").strip()
+        if raw_email:
+            return raw_email
+
+        access_payload = cls._decode_jwt_payload(str(item.get("access_token") or ""))
+        profile_claim = access_payload.get("https://api.openai.com/profile")
+        if isinstance(profile_claim, dict):
+            profile_email = str(profile_claim.get("email") or "").strip()
+            if profile_email:
+                return profile_email
+
+        id_payload = cls._decode_jwt_payload(str(item.get("id_token") or ""))
+        id_email = str(id_payload.get("email") or "").strip()
+        return id_email
+
+    @staticmethod
     def _normalize_account_type(value: object) -> str | None:
         raw = str(value or "").strip()
         if not raw:
@@ -221,7 +242,7 @@ class AccountService:
         normalized["status"] = normalized.get("status") or "正常"
         normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
         normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
-        normalized["email"] = normalized.get("email") or None
+        normalized["email"] = self._extract_account_email(normalized) or None
         normalized["user_id"] = normalized.get("user_id") or None
         normalized["proxy"] = str(normalized.get("proxy") or "").strip()
         source_type = normalized.get("source_type")
@@ -426,6 +447,7 @@ class AccountService:
                 old_inflight = int(self._image_inflight.pop(old_token, 0))
                 if old_inflight:
                     self._image_inflight[new_token] = int(self._image_inflight.get(new_token, 0)) + old_inflight
+            self._remove_duplicate_email_accounts_locked(account, new_token)
             self._accounts[new_token] = account
             self._save_accounts()
             self._image_slot_condition.notify_all()
@@ -1101,11 +1123,50 @@ class AccountService:
     def add_accounts(self, tokens: list[str], source_type: str = "web") -> dict:
         tokens = list(dict.fromkeys(token for token in tokens if token))
         if not tokens:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+            return {"added": 0, "skipped": 0, "replaced": 0, "items": self.list_accounts()}
         return self._add_account_payloads([
             {"access_token": token, "source_type": self._normalize_source_type(source_type)}
             for token in tokens
         ])
+
+    def _find_duplicate_email_account_locked(self, email_key: str, access_token: str) -> dict | None:
+        if not email_key:
+            return None
+        for token, account in self._accounts.items():
+            if token != access_token and self._normalize_email_key(account.get("email")) == email_key:
+                return dict(account)
+        return None
+
+    def _remove_duplicate_email_accounts_locked(self, account: dict, access_token: str) -> int:
+        email_key = self._normalize_email_key(account.get("email"))
+        if not email_key:
+            return 0
+
+        duplicate_tokens = [
+            token
+            for token, item in self._accounts.items()
+            if token != access_token and self._normalize_email_key(item.get("email")) == email_key
+        ]
+        if not duplicate_tokens:
+            return 0
+
+        removed_set = set(duplicate_tokens)
+        for duplicate_token in duplicate_tokens:
+            self._accounts.pop(duplicate_token, None)
+            self._token_aliases[duplicate_token] = access_token
+            old_inflight = int(self._image_inflight.pop(duplicate_token, 0))
+            if old_inflight:
+                self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + old_inflight
+
+        self._token_aliases = {
+            old_token: (access_token if new_token in removed_set else new_token)
+            for old_token, new_token in self._token_aliases.items()
+            if old_token != access_token
+        }
+        return len(duplicate_tokens)
+
+    def _account_payload_email_key(self, payload: dict) -> str:
+        return self._normalize_email_key(payload.get("email") or self._extract_account_email(payload))
 
     def _add_account_payloads(self, payloads: list[dict]) -> dict:
         deduped: dict[str, dict] = {}
@@ -1119,21 +1180,39 @@ class AccountService:
             deduped[access_token] = {**current, **payload, "access_token": access_token}
 
         if not deduped:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+            return {"added": 0, "skipped": 0, "replaced": 0, "items": self.list_accounts()}
+
+        deduped_payloads: list[dict] = []
+        email_positions: dict[str, int] = {}
+        for payload in deduped.values():
+            email_key = self._account_payload_email_key(payload)
+            if email_key and email_key in email_positions:
+                deduped_payloads[email_positions[email_key]] = payload
+                continue
+            if email_key:
+                email_positions[email_key] = len(deduped_payloads)
+            deduped_payloads.append(payload)
 
         with self._lock:
             added = 0
             skipped = 0
-            for access_token, payload in deduped.items():
+            replaced = 0
+            cumulative_added = 0
+            for payload in deduped_payloads:
+                access_token = self._account_payload_token(payload)
                 current = self._accounts.get(access_token)
-                if current is None:
-                    added += 1
-                    self._cumulative_total += 1
-                    self._save_cumulative_total()
-                    current = {"created_at": self._now()}
-                else:
+                same_token_exists = current is not None
+                if same_token_exists:
                     skipped += 1
+                else:
+                    email_key = self._account_payload_email_key(payload)
+                    current = self._find_duplicate_email_account_locked(email_key, access_token)
+                if current is None:
+                    current = {"created_at": self._now()}
                 incoming = dict(payload)
+                incoming_email = self._extract_account_email(incoming)
+                if incoming_email:
+                    incoming["email"] = incoming_email
                 if not incoming.get("created_at"):
                     incoming.pop("created_at", None)
                 account = self._normalize_account(
@@ -1145,12 +1224,21 @@ class AccountService:
                     }
                 )
                 if account is not None:
+                    duplicate_count = self._remove_duplicate_email_accounts_locked(account, access_token)
+                    if not same_token_exists and duplicate_count == 0:
+                        added += 1
+                        cumulative_added += 1
+                    else:
+                        replaced += duplicate_count
                     self._accounts[access_token] = account
+            if cumulative_added:
+                self._cumulative_total += cumulative_added
+                self._save_cumulative_total()
             self._save_accounts()
             items = [dict(item) for item in self._accounts.values()]
-            log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
-                            {"added": added, "skipped": skipped})
-        return {"added": added, "skipped": skipped, "items": items}
+            log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，替换 {replaced} 个，跳过 {skipped} 个",
+                            {"added": added, "replaced": replaced, "skipped": skipped})
+        return {"added": added, "skipped": skipped, "replaced": replaced, "items": items}
 
     def delete_accounts(self, tokens: list[str]) -> dict:
         target_set = set(token for token in tokens if token)
@@ -1192,11 +1280,14 @@ class AccountService:
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
                 return None
+            replaced = self._remove_duplicate_email_accounts_locked(account, access_token)
             self._accounts[access_token] = account
             self._save_accounts()
             if not quiet:
-                log_service.add(LOG_TYPE_ACCOUNT, "更新账号",
-                                {"token": anonymize_token(access_token), "status": account.get("status")})
+                payload = {"token": anonymize_token(access_token), "status": account.get("status")}
+                if replaced:
+                    payload["replaced"] = replaced
+                log_service.add(LOG_TYPE_ACCOUNT, "更新账号", payload)
             return dict(account)
         return None
 

@@ -51,6 +51,7 @@ def _normalize_import_job(raw: object, *, fail_unfinished: bool) -> dict | None:
         "completed": int(raw.get("completed") or 0),
         "added": int(raw.get("added") or 0),
         "skipped": int(raw.get("skipped") or 0),
+        "replaced": int(raw.get("replaced") or 0),
         "refreshed": int(raw.get("refreshed") or 0),
         "failed": int(raw.get("failed") or 0),
         "errors": raw.get("errors") if isinstance(raw.get("errors"), list) else [],
@@ -437,6 +438,7 @@ class Sub2APIImportService:
             "completed": 0,
             "added": 0,
             "skipped": 0,
+            "replaced": 0,
             "refreshed": 0,
             "failed": 0,
             "errors": [],
@@ -472,7 +474,7 @@ class Sub2APIImportService:
     def _run_import(self, server_id: str, server: dict, account_ids: list[str]) -> None:
         self._update_job(server_id, status="running")
 
-        tokens: list[str] = []
+        account_payloads: list[dict] = []
         max_workers = min(8, max(1, len(account_ids)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
@@ -482,8 +484,12 @@ class Sub2APIImportService:
             for future in as_completed(future_map):
                 account_id = future_map[future]
                 try:
-                    token, _meta = future.result()
-                    tokens.append(token)
+                    token, meta = future.result()
+                    account_payloads.append({
+                        "access_token": token,
+                        "source_type": "codex",
+                        **{key: value for key, value in meta.items() if value},
+                    })
                 except Exception as exc:
                     self._append_error(server_id, account_id, str(exc) or "unknown error")
 
@@ -495,7 +501,7 @@ class Sub2APIImportService:
                     failed=failed,
                 )
 
-        if not tokens:
+        if not account_payloads:
             current = self._config.get_import_job(server_id) or {}
             self._update_job(
                 server_id,
@@ -505,7 +511,8 @@ class Sub2APIImportService:
             )
             return
 
-        add_result = account_service.add_accounts(tokens, source_type="codex")
+        tokens = [str(item.get("access_token") or "").strip() for item in account_payloads if str(item.get("access_token") or "").strip()]
+        add_result = account_service.add_account_items(account_payloads)
         refresh_result = account_service.refresh_accounts(tokens)
         current = self._config.get_import_job(server_id) or {}
         self._update_job(
@@ -514,6 +521,7 @@ class Sub2APIImportService:
             completed=len(account_ids),
             added=int(add_result.get("added") or 0),
             skipped=int(add_result.get("skipped") or 0),
+            replaced=int(add_result.get("replaced") or 0),
             refreshed=int(refresh_result.get("refreshed") or 0),
             failed=len(current.get("errors") or []),
         )
