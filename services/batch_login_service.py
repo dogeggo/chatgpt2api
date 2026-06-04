@@ -85,6 +85,7 @@ class EmailOtpLoginClient:
         self.session = create_session(proxy)
         self.device_id = str(uuid.uuid4())
         self.code_verifier = ""
+        self.email_verification_url = ""
 
     def close(self) -> None:
         self.session.close()
@@ -105,6 +106,7 @@ class EmailOtpLoginClient:
     def _authorize(self, email: str) -> str:
         self.session.cookies.set("oai-did", self.device_id, domain=".auth.openai.com")
         self.session.cookies.set("oai-did", self.device_id, domain="auth.openai.com")
+        self.email_verification_url = ""
         self.code_verifier, code_challenge = generate_pkce()
         params = {
             "issuer": auth_base,
@@ -132,14 +134,16 @@ class EmailOtpLoginClient:
             allow_redirects=True,
             verify=False,
         )
+        if resp is not None and _is_cloudflare_challenge(resp):
+            raise RuntimeError("被 Cloudflare 拦截，请更换 IP 重试")
         if resp is None or resp.status_code not in (200, 302):
-            if _is_cloudflare_challenge(resp):
-                raise RuntimeError("被 Cloudflare 拦截，请更换 IP 重试")
             status = getattr(resp, "status_code", "unknown")
             debug = _response_debug_detail(resp)
             raise RuntimeError(error or f"platform_authorize_http_{status}, {debug}")
 
         final_url = str(getattr(resp, "url", "") or "")
+        if "/email-verification" in final_url:
+            self.email_verification_url = final_url
         if "/error" in final_url and "payload=" in final_url:
             try:
                 parsed_query = parse_qs(urlparse(final_url).query)
@@ -154,23 +158,62 @@ class EmailOtpLoginClient:
                 raise RuntimeError(f"authorize_redirect_error: {final_url[:300]}, parse_error={exc}") from exc
 
         callback_params = extract_oauth_callback_params_from_url(final_url)
-        return str((callback_params or {}).get("code") or "").strip()
+        auth_code = str((callback_params or {}).get("code") or "").strip()
+        if not auth_code and not self.email_verification_url:
+            debug = _response_debug_detail(resp)
+            raise RuntimeError(f"OpenAI 未进入邮箱验证码登录步骤，无法发送验证码: {debug}")
+        return auth_code
 
-    def _send_otp(self) -> None:
+    def _otp_referer(self) -> str:
+        return self.email_verification_url or f"{auth_base}/email-verification"
+
+    def _raise_for_error_redirect(self, final_url: str) -> None:
+        if "/error" not in final_url or "payload=" not in final_url:
+            return
+        try:
+            parsed_query = parse_qs(urlparse(final_url).query)
+            error_payload_b64 = parsed_query.get("payload", [""])[0]
+            error_payload_b64 += "=" * ((4 - len(error_payload_b64) % 4) % 4)
+            error_payload = json.loads(base64.b64decode(error_payload_b64))
+            error_code = str(error_payload.get("errorCode") or "unknown")
+            raise RuntimeError(f"send_otp_error_{error_code}: {json.dumps(error_payload, ensure_ascii=False)[:500]}")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"send_otp_redirect_error: {final_url[:300]}, parse_error={exc}") from exc
+
+    def _send_otp(self) -> str:
+        if not self.email_verification_url:
+            raise RuntimeError("OpenAI 未进入邮箱验证码登录步骤，无法发送验证码")
+        referer = self._otp_referer()
+        headers = self._json_headers(referer)
+        headers["accept"] = "*/*"
         resp, error = request_with_local_retry(
             self.session,
             "get",
             f"{auth_base}/api/accounts/email-otp/send",
-            headers=self._navigate_headers(f"{auth_base}/email-verification"),
+            headers=headers,
             allow_redirects=True,
             verify=False,
         )
-        if resp is None or resp.status_code not in (200, 302):
+        if resp is None or resp.status_code not in (200, 202, 204, 302):
             body = str(getattr(resp, "text", "") or "")[:500] if resp is not None else ""
             raise RuntimeError(error or f"send_otp_http_{getattr(resp, 'status_code', 'unknown')}_body={body}")
+        if _is_cloudflare_challenge(resp):
+            raise RuntimeError("发送验证码被 Cloudflare 拦截，请更换 IP 重试")
+        final_url = str(getattr(resp, "url", "") or "")
+        self._raise_for_error_redirect(final_url)
+
+        data = _response_json(resp)
+        if isinstance(data, dict):
+            error_value = data.get("error") or data.get("errorCode") or data.get("error_code")
+            if error_value:
+                raise RuntimeError(f"send_otp_error: {json.dumps(data, ensure_ascii=False)[:500]}")
+
+        return f"HTTP {resp.status_code}"
 
     def _validate_otp(self, code: str) -> tuple[dict[str, Any], str]:
-        headers = self._json_headers(f"{auth_base}/email-verification")
+        headers = self._json_headers(self._otp_referer())
         resp, error = request_with_local_retry(
             self.session,
             "post",
@@ -181,7 +224,7 @@ class EmailOtpLoginClient:
         )
 
         if resp is None or resp.status_code != 200:
-            headers = self._json_headers(f"{auth_base}/email-verification")
+            headers = self._json_headers(self._otp_referer())
             sentinel_val, oai_sc_val = build_sentinel_token_tuple(
                 self.session,
                 self.device_id,
@@ -243,11 +286,12 @@ class EmailOtpLoginClient:
             on_step("清理历史邮件")
             mail_provider.remember_latest_message(mailbox_config, mailbox)
             on_step("发送验证码")
-            self._send_otp()
+            send_result = self._send_otp()
+            on_step(f"验证码发送请求完成: {send_result}")
             on_step("等待验证码")
             code = mail_provider.wait_for_code(mailbox_config, mailbox)
             if not code:
-                raise RuntimeError("等待登录验证码超时")
+                raise RuntimeError("等待登录验证码超时，发送请求已返回但邮箱未收到新验证码")
             on_step("校验验证码")
             payload, response_url = self._validate_otp(code)
             auth_code = self._extract_auth_code(payload, response_url)
@@ -288,12 +332,14 @@ class BatchLoginService:
     def _clean(value: Any) -> str:
         return str(value or "").strip()
 
-    def _cloudflare_provider_from_options(self, raw_mail: dict[str, Any], options: dict[str, Any] | None) -> dict[str, Any] | None:
-        if not isinstance(options, dict):
-            return None
+    def _has_cloudflare_mail_options(self, options: dict[str, Any] | None) -> bool:
+        return isinstance(options, dict) and any(
+            self._clean(options.get(key))
+            for key in ("api_base", "admin_password", "custom_password")
+        )
 
-        has_options = any(self._clean(options.get(key)) for key in ("api_base", "admin_password", "custom_password"))
-        if not has_options:
+    def _cloudflare_provider_from_options(self, raw_mail: dict[str, Any], options: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not self._has_cloudflare_mail_options(options):
             return None
 
         base_provider = next(
@@ -315,6 +361,61 @@ class BatchLoginService:
             if key in options:
                 provider[key] = self._clean(options.get(key))
         return provider
+
+    def _save_cloudflare_mail_options(self, mail_options: dict[str, Any] | None) -> None:
+        if not self._has_cloudflare_mail_options(mail_options):
+            return
+
+        cfg = register_service.get()
+        raw_mail = cfg.get("mail") if isinstance(cfg.get("mail"), dict) else {}
+        providers = [
+            dict(item)
+            for item in raw_mail.get("providers", [])
+            if isinstance(item, dict)
+        ]
+        target_index = next(
+            (
+                index
+                for index, item in enumerate(providers)
+                if item.get("enable")
+                and self._clean(item.get("type")) == "cloudflare_temp_email"
+            ),
+            None,
+        )
+        if target_index is None:
+            target_index = next(
+                (
+                    index
+                    for index, item in enumerate(providers)
+                    if self._clean(item.get("type")) == "cloudflare_temp_email"
+                ),
+                None,
+            )
+        if target_index is None:
+            providers.append(
+                {
+                    "type": "cloudflare_temp_email",
+                    "enable": True,
+                    "api_base": "",
+                    "admin_password": "",
+                    "custom_password": "",
+                    "domain": [],
+                }
+            )
+            target_index = len(providers) - 1
+
+        provider = {
+            **providers[target_index],
+            "type": "cloudflare_temp_email",
+            "enable": True,
+        }
+        for key in ("api_base", "admin_password", "custom_password"):
+            if key in mail_options:
+                provider[key] = self._clean(mail_options.get(key))
+        provider.setdefault("domain", [])
+        providers[target_index] = provider
+
+        register_service.update({"mail": {**raw_mail, "providers": providers}})
 
     def _load_cloudflare_mail_config(self, mail_options: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
         cfg = register_service.get()
@@ -352,6 +453,7 @@ class BatchLoginService:
         if not normalized_emails:
             raise ValueError("邮箱列表不能为空")
         mail_config, proxy = self._load_cloudflare_mail_config(mail_options)
+        self._save_cloudflare_mail_options(mail_options)
         job_id = uuid.uuid4().hex
         job = {
             "job_id": job_id,
