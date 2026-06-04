@@ -24,6 +24,7 @@ from api.support import (
     sanitize_sub2api_servers,
 )
 from services.account_service import account_service
+from services.batch_login_service import batch_login_service
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.oauth_login_service import OAuthLoginError, oauth_login_service
 from services.sub2api_service import (
@@ -56,6 +57,10 @@ class AccountDeleteRequest(BaseModel):
 
 class AccountRefreshRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
+
+
+class BatchLoginRequest(BaseModel):
+    emails: list[str] = Field(default_factory=list)
 
 
 class AccountExportRequest(BaseModel):
@@ -302,6 +307,23 @@ def create_router() -> APIRouter:
         if progress is None:
             raise HTTPException(status_code=404, detail={"error": "progress not found"})
         return progress
+
+    @router.post("/api/accounts/batch-login")
+    async def start_batch_login(body: BatchLoginRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            job = await run_in_threadpool(batch_login_service.start, body.emails)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return {"job": job}
+
+    @router.get("/api/accounts/batch-login/{job_id}")
+    async def get_batch_login(job_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        job = batch_login_service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail={"error": "batch login job not found"})
+        return {"job": job}
 
     @router.post("/api/accounts/export")
     async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):

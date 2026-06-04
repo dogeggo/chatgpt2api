@@ -999,6 +999,22 @@ def wait_for_code(mail_config: dict, mailbox: dict) -> str | None:
         provider.close()
 
 
+def remember_latest_message(mail_config: dict, mailbox: dict) -> None:
+    """将当前最新邮件加入已处理集合，避免后续等待验证码时误用历史邮件。"""
+    provider = _create_provider(mail_config, str(mailbox.get("provider") or ""), str(mailbox.get("provider_ref") or ""))
+    try:
+        message = provider.fetch_latest_message(mailbox)
+        if not message:
+            return
+        seen_value = mailbox.setdefault("_seen_code_message_refs", [])
+        if not isinstance(seen_value, list):
+            seen_value = []
+            mailbox["_seen_code_message_refs"] = seen_value
+        seen_value.append(_message_tracking_ref(message))
+    finally:
+        provider.close()
+
+
 def get_existing_mailbox(mail_config: dict, email: str) -> dict:
     """通过管理员密码获取已有邮箱地址的 JWT，用于查询邮件。"""
     enabled = _enabled_entries(mail_config)

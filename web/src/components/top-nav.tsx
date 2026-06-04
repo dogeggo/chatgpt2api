@@ -15,6 +15,7 @@ import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 const adminNavItems = [
   { href: "/image", label: "生图" },
   { href: "/accounts", label: "号池管理" },
+  { href: "/batch-login", label: "批量登录" },
   { href: "/register", label: "注册机" },
   { href: "/image-manager", label: "图片管理" },
   { href: "/logs", label: "日志管理" },
@@ -120,7 +121,7 @@ export function TopNav() {
           </Link>
           <HeaderActions className="ml-auto sm:hidden" showGithubText={false} />
         </div>
-        <nav className="hide-scrollbar -mx-1 hidden min-w-0 flex-1 gap-1 overflow-x-auto px-1 sm:mx-0 sm:flex sm:justify-center sm:gap-8 sm:overflow-visible sm:px-0">
+        <nav className="hide-scrollbar -mx-1 hidden min-w-0 flex-1 gap-1 overflow-x-auto px-1 sm:mx-0 sm:flex sm:justify-center sm:gap-5 sm:overflow-visible sm:px-0 lg:gap-8">
           <a
             href={canvasHref}
             target="_blank"

@@ -94,6 +94,39 @@ export type RefreshProgressResponse = {
   results?: Array<{ token: string; status: string; error?: string | null }>;
 };
 
+export type BatchLoginItem = {
+  email: string;
+  status: "成功" | "失败" | string;
+  token?: string;
+  error?: string | null;
+  message?: string;
+  finished_at?: string;
+};
+
+export type BatchLoginLog = {
+  time: string;
+  email: string;
+  level: "info" | "green" | "red" | string;
+  text: string;
+};
+
+export type BatchLoginJob = {
+  job_id: string;
+  total: number;
+  processed: number;
+  success: number;
+  fail: number;
+  done: boolean;
+  error?: string | null;
+  current_email?: string;
+  current_step?: string;
+  provider: string;
+  created_at: string;
+  updated_at: string;
+  items: BatchLoginItem[];
+  logs: BatchLoginLog[];
+};
+
 type AccountUpdateResponse = {
   item: Account;
   items: Account[];
@@ -375,6 +408,17 @@ export async function reLoginAccounts(accessTokens: string[]) {
 
 export async function fetchReLoginProgress(progressId: string) {
   return httpRequest<RefreshProgressResponse>(`/api/accounts/re-login/progress/${progressId}`);
+}
+
+export async function startBatchLogin(emails: string[]) {
+  return httpRequest<{ job: BatchLoginJob }>("/api/accounts/batch-login", {
+    method: "POST",
+    body: { emails },
+  });
+}
+
+export async function fetchBatchLoginJob(jobId: string) {
+  return httpRequest<{ job: BatchLoginJob }>(`/api/accounts/batch-login/${jobId}`);
 }
 
 export async function updateAccount(
