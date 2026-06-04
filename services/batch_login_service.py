@@ -284,23 +284,59 @@ class BatchLoginService:
         for job_id, _ in ordered[: len(self._jobs) - self._MAX_JOBS]:
             self._jobs.pop(job_id, None)
 
-    def _load_cloudflare_mail_config(self) -> tuple[dict[str, Any], str]:
+    @staticmethod
+    def _clean(value: Any) -> str:
+        return str(value or "").strip()
+
+    def _cloudflare_provider_from_options(self, raw_mail: dict[str, Any], options: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(options, dict):
+            return None
+
+        has_options = any(self._clean(options.get(key)) for key in ("api_base", "admin_password", "custom_password"))
+        if not has_options:
+            return None
+
+        base_provider = next(
+            (
+                item
+                for item in raw_mail.get("providers", [])
+                if isinstance(item, dict)
+                and item.get("enable")
+                and self._clean(item.get("type")) == "cloudflare_temp_email"
+            ),
+            {},
+        )
+        provider = {
+            **base_provider,
+            "type": "cloudflare_temp_email",
+            "enable": True,
+        }
+        for key in ("api_base", "admin_password", "custom_password"):
+            if key in options:
+                provider[key] = self._clean(options.get(key))
+        return provider
+
+    def _load_cloudflare_mail_config(self, mail_options: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
         cfg = register_service.get()
         raw_mail = cfg.get("mail") if isinstance(cfg.get("mail"), dict) else {}
-        providers = [
-            {**item, "enable": True}
-            for item in raw_mail.get("providers", [])
-            if isinstance(item, dict)
-            and item.get("enable")
-            and str(item.get("type") or "").strip() == "cloudflare_temp_email"
-        ]
+        option_provider = self._cloudflare_provider_from_options(raw_mail, mail_options)
+        if option_provider:
+            providers = [option_provider]
+        else:
+            providers = [
+                {**item, "enable": True}
+                for item in raw_mail.get("providers", [])
+                if isinstance(item, dict)
+                and item.get("enable")
+                and self._clean(item.get("type")) == "cloudflare_temp_email"
+            ]
         if not providers:
             raise ValueError("请先在注册机邮箱配置中启用 cloudflare_temp_email")
 
         for index, provider in enumerate(providers, start=1):
-            if not str(provider.get("api_base") or "").strip():
+            if not self._clean(provider.get("api_base")):
                 raise ValueError(f"cloudflare_temp_email#{index} 缺少 API Base")
-            if not str(provider.get("admin_password") or "").strip():
+            if not self._clean(provider.get("admin_password")):
                 raise ValueError(f"cloudflare_temp_email#{index} 缺少 Admin Password")
 
         proxy = str(cfg.get("proxy") or "").strip()
@@ -311,11 +347,11 @@ class BatchLoginService:
         }
         return mail_config, proxy
 
-    def start(self, emails: list[str]) -> dict[str, Any]:
+    def start(self, emails: list[str], mail_options: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized_emails = _normalize_emails(emails)
         if not normalized_emails:
             raise ValueError("邮箱列表不能为空")
-        mail_config, proxy = self._load_cloudflare_mail_config()
+        mail_config, proxy = self._load_cloudflare_mail_config(mail_options)
         job_id = uuid.uuid4().hex
         job = {
             "job_id": job_id,

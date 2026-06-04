@@ -127,6 +127,12 @@ export type BatchLoginJob = {
   logs: BatchLoginLog[];
 };
 
+export type BatchLoginCloudflareTempEmail = {
+  api_base: string;
+  admin_password: string;
+  custom_password?: string;
+};
+
 type AccountUpdateResponse = {
   item: Account;
   items: Account[];
@@ -410,10 +416,13 @@ export async function fetchReLoginProgress(progressId: string) {
   return httpRequest<RefreshProgressResponse>(`/api/accounts/re-login/progress/${progressId}`);
 }
 
-export async function startBatchLogin(emails: string[]) {
+export async function startBatchLogin(emails: string[], cloudflareTempEmail?: BatchLoginCloudflareTempEmail) {
   return httpRequest<{ job: BatchLoginJob }>("/api/accounts/batch-login", {
     method: "POST",
-    body: { emails },
+    body: {
+      emails,
+      ...(cloudflareTempEmail ? { cloudflare_temp_email: cloudflareTempEmail } : {}),
+    },
   });
 }
 

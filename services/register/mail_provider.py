@@ -266,8 +266,15 @@ class CloudflareTempMailProvider(BaseMailProvider):
         super().__init__(conf, str(entry.get("provider_ref") or ""))
         self.api_base = str(entry["api_base"]).rstrip("/")
         self.admin_password = str(entry["admin_password"]).strip()
+        self.custom_password = str(entry.get("custom_password") or "").strip()
         self.domain = entry.get("domain") or []
         self.session = _create_session(conf)
+
+    def _admin_headers(self) -> dict[str, str]:
+        headers = {"x-admin-auth": self.admin_password}
+        if self.custom_password:
+            headers["x-custom-auth"] = self.custom_password
+        return headers
 
     def _request(self, method: str, path: str, headers: dict | None = None, params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200,)):
         resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers={"Content-Type": "application/json", "User-Agent": self.conf["user_agent"], **(headers or {})}, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
@@ -275,8 +282,45 @@ class CloudflareTempMailProvider(BaseMailProvider):
             raise RuntimeError(f"CloudflareTempMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         return {} if resp.status_code == 204 else resp.json()
 
+    @staticmethod
+    def _list_payload(data: Any) -> list:
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("results", "data", "messages", "items"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
+                if isinstance(value, dict) and isinstance(value.get("messages"), list):
+                    return value["messages"]
+        return []
+
+    def _message_payload(self, item: dict[str, Any], address: str) -> dict[str, Any]:
+        text_content, html_content = _extract_content(item)
+        sender = item.get("from") or item.get("sender") or ""
+        if isinstance(sender, dict):
+            sender = sender.get("address") or sender.get("email") or sender.get("name") or ""
+        return {"provider": self.name, "mailbox": address, "message_id": str(item.get("id") or item.get("_id") or ""), "subject": str(item.get("subject") or ""), "sender": str(sender), "text_content": text_content, "html_content": html_content, "received_at": _parse_received_at(item.get("createdAt") or item.get("created_at") or item.get("receivedAt") or item.get("date") or item.get("timestamp")), "raw": item}
+
+    def _fetch_latest_message_with_admin(self, address: str) -> dict[str, Any] | None:
+        data = self._request("GET", "/admin/mails", headers=self._admin_headers(), params={"limit": 20, "offset": 0, "address": address})
+        raw = self._list_payload(data)
+        messages = [item for item in raw if isinstance(item, dict) and _message_matches_email(item, address)]
+        if not messages:
+            return None
+        return self._message_payload(messages[0], address)
+
+    def _fetch_latest_message_with_token(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        data = self._request("GET", "/api/mails", headers={"Authorization": f"Bearer {mailbox['token']}"}, params={"limit": 10, "offset": 0})
+        raw = self._list_payload(data)
+        address = str(mailbox.get("address") or "")
+        messages = [item for item in raw if isinstance(item, dict) and _message_matches_email(item, address)]
+        if not messages:
+            return None
+        return self._message_payload(messages[0], address)
+
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
-        data = self._request("POST", "/admin/new_address", headers={"x-admin-auth": self.admin_password}, payload={"enablePrefix": True, "name": username or _random_mailbox_name(), "domain": _next_domain(self.domain)})
+        data = self._request("POST", "/admin/new_address", headers=self._admin_headers(), payload={"enablePrefix": True, "name": username or _random_mailbox_name(), "domain": _next_domain(self.domain)})
         address = str(data.get("address") or "").strip()
         token = str(data.get("jwt") or "").strip()
         if not address or not token:
@@ -285,25 +329,13 @@ class CloudflareTempMailProvider(BaseMailProvider):
 
     def get_existing_mailbox(self, email: str) -> dict[str, Any]:
         """通过管理员密码获取已有邮箱地址的 JWT，用于查询邮件。"""
-        data = self._request("POST", "/admin/get_address", headers={"x-admin-auth": self.admin_password}, payload={"address": email})
-        address = str(data.get("address") or "").strip()
-        token = str(data.get("jwt") or "").strip()
-        if not address or not token:
-            raise RuntimeError(f"CloudflareTempMail 无法获取已有邮箱 {email} 的 JWT")
-        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token}
+        return {"provider": self.name, "provider_ref": self.provider_ref, "address": email, "admin_lookup": True}
 
     def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
-        data = self._request("GET", "/api/mails", headers={"Authorization": f"Bearer {mailbox['token']}"}, params={"limit": 10, "offset": 0})
-        raw = list(data.get("results") or []) if isinstance(data, dict) else data if isinstance(data, list) else []
-        messages = [item for item in raw if isinstance(item, dict) and _message_matches_email(item, str(mailbox.get("address") or ""))]
-        if not messages:
-            return None
-        item = messages[0]
-        text_content, html_content = _extract_content(item)
-        sender = item.get("from") or item.get("sender") or ""
-        if isinstance(sender, dict):
-            sender = sender.get("address") or sender.get("email") or sender.get("name") or ""
-        return {"provider": self.name, "mailbox": mailbox["address"], "message_id": str(item.get("id") or item.get("_id") or ""), "subject": str(item.get("subject") or ""), "sender": str(sender), "text_content": text_content, "html_content": html_content, "received_at": _parse_received_at(item.get("createdAt") or item.get("created_at") or item.get("receivedAt") or item.get("date") or item.get("timestamp")), "raw": item}
+        address = str(mailbox.get("address") or "").strip()
+        if mailbox.get("admin_lookup") or self.custom_password:
+            return self._fetch_latest_message_with_admin(address)
+        return self._fetch_latest_message_with_token(mailbox)
 
     def close(self) -> None:
         self.session.close()

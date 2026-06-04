@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
   CircleAlert,
+  KeyRound,
   LoaderCircle,
   LogIn,
   MailCheck,
@@ -13,10 +14,12 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   fetchBatchLoginJob,
   startBatchLogin,
+  type BatchLoginCloudflareTempEmail,
   type BatchLoginItem,
   type BatchLoginJob,
 } from "@/lib/api";
@@ -50,6 +53,9 @@ function formatTime(value?: string) {
 
 function BatchLoginPageContent() {
   const [emailText, setEmailText] = useState("");
+  const [apiBase, setApiBase] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [customPassword, setCustomPassword] = useState("");
   const [job, setJob] = useState<BatchLoginJob | null>(null);
   const [activeJobId, setActiveJobId] = useState("");
   const [isStarting, setIsStarting] = useState(false);
@@ -95,9 +101,23 @@ function BatchLoginPageContent() {
       toast.error("邮箱列表不能为空");
       return;
     }
+    const cloudflareTempEmail: BatchLoginCloudflareTempEmail = {
+      api_base: apiBase.trim(),
+      admin_password: adminPassword.trim(),
+      custom_password: customPassword.trim(),
+    };
+    const hasMailConfig = Boolean(
+      cloudflareTempEmail.api_base ||
+      cloudflareTempEmail.admin_password ||
+      cloudflareTempEmail.custom_password,
+    );
+    if (hasMailConfig && (!cloudflareTempEmail.api_base || !cloudflareTempEmail.admin_password)) {
+      toast.error("API Base 和 Admin Password 不能为空");
+      return;
+    }
     setIsStarting(true);
     try {
-      const data = await startBatchLogin(emails);
+      const data = await startBatchLogin(emails, hasMailConfig ? cloudflareTempEmail : undefined);
       setJob(data.job);
       setActiveJobId(data.job.job_id);
       toast.success(`已提交 ${data.job.total} 个邮箱`);
@@ -132,11 +152,56 @@ function BatchLoginPageContent() {
             </div>
           </div>
 
+          <div className="space-y-3 border-t border-stone-200 pt-3">
+            <div className="flex items-center gap-3">
+              <div className="flex size-9 items-center justify-center rounded-md bg-stone-100">
+                <KeyRound className="size-5 text-stone-600" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold tracking-tight">邮箱服务</h2>
+              </div>
+            </div>
+            <div className="grid gap-3">
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">API Base</label>
+                <Input
+                  value={apiBase}
+                  onChange={(event) => setApiBase(event.target.value)}
+                  placeholder="https://worker.example.com"
+                  className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs"
+                  disabled={isRunning || isStarting}
+                />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">Admin Password</label>
+                  <Input
+                    type="password"
+                    value={adminPassword}
+                    onChange={(event) => setAdminPassword(event.target.value)}
+                    className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs"
+                    disabled={isRunning || isStarting}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">Custom Password</label>
+                  <Input
+                    type="password"
+                    value={customPassword}
+                    onChange={(event) => setCustomPassword(event.target.value)}
+                    className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs"
+                    disabled={isRunning || isStarting}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
           <Textarea
             value={emailText}
             onChange={(event) => setEmailText(event.target.value)}
             placeholder={"user01@example.com\nuser02@example.com"}
-            className="min-h-72 flex-1 resize-none rounded-xl border-stone-200 bg-white font-mono text-xs leading-6 shadow-none"
+            className="min-h-40 flex-1 resize-none rounded-xl border-stone-200 bg-white font-mono text-xs leading-6 shadow-none"
             disabled={isRunning || isStarting}
           />
 
