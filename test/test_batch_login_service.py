@@ -5,7 +5,58 @@ import threading
 import unittest
 
 from services import batch_login_service as batch_login_module
-from services.batch_login_service import BatchLoginService
+from services.batch_login_service import BatchLoginService, EmailOtpLoginClient
+
+
+class FakeCookies:
+    def __init__(self) -> None:
+        self.items: list[tuple[str, str, str | None]] = []
+
+    def set(self, name: str, value: str, domain: str | None = None) -> None:
+        self.items.append((name, value, domain))
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, url: str, data: dict | None = None, text: str = "") -> None:
+        self.status_code = status_code
+        self.url = url
+        self._data = copy.deepcopy(data or {})
+        self.text = text if text else ("{}" if data is not None else "")
+        self.headers: dict[str, str] = {}
+
+    def json(self) -> dict:
+        return copy.deepcopy(self._data)
+
+
+class FakeSession:
+    def __init__(self) -> None:
+        self.cookies = FakeCookies()
+        self.calls: list[dict] = []
+        self.closed = False
+
+    def request(self, method: str, url: str, **kwargs):
+        method = method.upper()
+        self.calls.append({"method": method, "url": url, "kwargs": kwargs})
+        if "/api/accounts/authorize" in url:
+            return FakeResponse(200, f"{batch_login_module.auth_base}/log-in/password")
+        if "/api/accounts/passwordless/send-otp" in url:
+            return FakeResponse(
+                200,
+                f"{batch_login_module.auth_base}/email-verification",
+                {
+                    "continue_url": f"{batch_login_module.auth_base}/email-verification",
+                    "page": {"type": "email_otp_verification"},
+                },
+            )
+        if "/api/accounts/email-otp/validate" in url:
+            return FakeResponse(
+                200,
+                f"{batch_login_module.platform_oauth_redirect_uri}?code=test-auth-code&state=test-state",
+            )
+        raise AssertionError(f"unexpected request: {method} {url}")
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeRegisterService:
@@ -32,6 +83,63 @@ class BatchLoginServiceTests(unittest.TestCase):
             return callback()
         finally:
             batch_login_module.register_service = original
+
+    def test_email_otp_login_uses_passwordless_otp_without_password(self) -> None:
+        fake_session = FakeSession()
+        original_create_session = batch_login_module.create_session
+        original_remember_latest_message = batch_login_module.mail_provider.remember_latest_message
+        original_wait_for_code = batch_login_module.mail_provider.wait_for_code
+        original_build_sentinel = batch_login_module.build_sentinel_token_tuple
+        original_request_token = batch_login_module.request_platform_oauth_token
+
+        try:
+            batch_login_module.create_session = lambda _proxy="": fake_session
+            batch_login_module.mail_provider.remember_latest_message = lambda *_args, **_kwargs: None
+            batch_login_module.mail_provider.wait_for_code = lambda *_args, **_kwargs: "123456"
+            batch_login_module.build_sentinel_token_tuple = lambda *_args, **_kwargs: ("sentinel-token", "sentinel-cookie")
+            batch_login_module.request_platform_oauth_token = lambda _session, code, verifier: {
+                "access_token": f"access:{code}",
+                "refresh_token": f"refresh:{verifier[:8]}",
+                "id_token": "id-token",
+            }
+
+            steps: list[str] = []
+            client = EmailOtpLoginClient()
+            try:
+                result = client.login(
+                    "user@example.com",
+                    {"providers": []},
+                    {"address": "user@example.com"},
+                    steps.append,
+                )
+            finally:
+                client.close()
+
+            called_urls = [item["url"] for item in fake_session.calls]
+            self.assertTrue(any("/api/accounts/passwordless/send-otp" in url for url in called_urls))
+            self.assertTrue(any("/api/accounts/email-otp/validate" in url for url in called_urls))
+            self.assertFalse(any("/api/accounts/password/verify" in url for url in called_urls))
+
+            passwordless_call = next(
+                item for item in fake_session.calls if "/api/accounts/passwordless/send-otp" in item["url"]
+            )
+            self.assertEqual(passwordless_call["method"], "POST")
+            self.assertEqual(
+                passwordless_call["kwargs"]["headers"]["referer"],
+                f"{batch_login_module.auth_base}/log-in/password",
+            )
+            self.assertIn("openai-sentinel-token", passwordless_call["kwargs"]["headers"])
+
+            self.assertEqual(result["email"], "user@example.com")
+            self.assertEqual(result["access_token"], "access:test-auth-code")
+            self.assertIn("发送验证码", steps)
+            self.assertTrue(fake_session.closed)
+        finally:
+            batch_login_module.create_session = original_create_session
+            batch_login_module.mail_provider.remember_latest_message = original_remember_latest_message
+            batch_login_module.mail_provider.wait_for_code = original_wait_for_code
+            batch_login_module.build_sentinel_token_tuple = original_build_sentinel
+            batch_login_module.request_platform_oauth_token = original_request_token
 
     def test_start_saves_existing_cloudflare_mail_options(self) -> None:
         fake = FakeRegisterService(

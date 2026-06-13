@@ -86,6 +86,7 @@ class EmailOtpLoginClient:
         self.device_id = str(uuid.uuid4())
         self.code_verifier = ""
         self.email_verification_url = ""
+        self.passwordless_login_url = ""
 
     def close(self) -> None:
         self.session.close()
@@ -107,6 +108,7 @@ class EmailOtpLoginClient:
         self.session.cookies.set("oai-did", self.device_id, domain=".auth.openai.com")
         self.session.cookies.set("oai-did", self.device_id, domain="auth.openai.com")
         self.email_verification_url = ""
+        self.passwordless_login_url = ""
         self.code_verifier, code_challenge = generate_pkce()
         params = {
             "issuer": auth_base,
@@ -144,6 +146,8 @@ class EmailOtpLoginClient:
         final_url = str(getattr(resp, "url", "") or "")
         if "/email-verification" in final_url:
             self.email_verification_url = final_url
+        if "/log-in/password" in final_url:
+            self.passwordless_login_url = final_url
         if "/error" in final_url and "payload=" in final_url:
             try:
                 parsed_query = parse_qs(urlparse(final_url).query)
@@ -159,13 +163,16 @@ class EmailOtpLoginClient:
 
         callback_params = extract_oauth_callback_params_from_url(final_url)
         auth_code = str((callback_params or {}).get("code") or "").strip()
-        if not auth_code and not self.email_verification_url:
+        if not auth_code and not self.email_verification_url and not self.passwordless_login_url:
             debug = _response_debug_detail(resp)
-            raise RuntimeError(f"OpenAI 未进入邮箱验证码登录步骤，无法发送验证码: {debug}")
+            raise RuntimeError(f"OpenAI 未进入邮箱验证码或一次性验证码登录步骤，无法发送验证码: {debug}")
         return auth_code
 
     def _otp_referer(self) -> str:
         return self.email_verification_url or f"{auth_base}/email-verification"
+
+    def _passwordless_referer(self) -> str:
+        return self.passwordless_login_url or f"{auth_base}/log-in/password"
 
     def _raise_for_error_redirect(self, final_url: str) -> None:
         if "/error" not in final_url or "payload=" not in final_url:
@@ -182,9 +189,53 @@ class EmailOtpLoginClient:
         except Exception as exc:
             raise RuntimeError(f"send_otp_redirect_error: {final_url[:300]}, parse_error={exc}") from exc
 
-    def _send_otp(self) -> str:
-        if not self.email_verification_url:
-            raise RuntimeError("OpenAI 未进入邮箱验证码登录步骤，无法发送验证码")
+    def _handle_send_otp_response(self, resp: Any, error: str, label: str) -> str:
+        if resp is None or resp.status_code not in (200, 202, 204, 302):
+            body = str(getattr(resp, "text", "") or "")[:500] if resp is not None else ""
+            raise RuntimeError(error or f"{label}_http_{getattr(resp, 'status_code', 'unknown')}_body={body}")
+        if _is_cloudflare_challenge(resp):
+            raise RuntimeError("发送验证码被 Cloudflare 拦截，请更换 IP 重试")
+
+        final_url = str(getattr(resp, "url", "") or "")
+        self._raise_for_error_redirect(final_url)
+
+        data = _response_json(resp)
+        if isinstance(data, dict):
+            error_value = data.get("error") or data.get("errorCode") or data.get("error_code")
+            if error_value:
+                raise RuntimeError(f"{label}_error: {json.dumps(data, ensure_ascii=False)[:500]}")
+            continue_url = str(data.get("continue_url") or "").strip()
+            if "/email-verification" in continue_url:
+                self.email_verification_url = continue_url
+
+        if "/email-verification" in final_url:
+            self.email_verification_url = final_url
+
+        return f"HTTP {resp.status_code}"
+
+    def _send_passwordless_otp(self) -> str:
+        headers = self._json_headers(self._passwordless_referer())
+        sentinel_val, oai_sc_val = build_sentinel_token_tuple(
+            self.session,
+            self.device_id,
+            "password_verify",
+            user_agent=user_agent,
+            sec_ch_ua=sec_ch_ua,
+        )
+        headers["openai-sentinel-token"] = sentinel_val
+        if oai_sc_val:
+            self.session.cookies.set("oai-sc", oai_sc_val, domain=".openai.com")
+
+        resp, error = request_with_local_retry(
+            self.session,
+            "post",
+            f"{auth_base}/api/accounts/passwordless/send-otp",
+            headers=headers,
+            verify=False,
+        )
+        return self._handle_send_otp_response(resp, error, "passwordless_send_otp")
+
+    def _send_email_otp(self) -> str:
         referer = self._otp_referer()
         headers = self._json_headers(referer)
         headers["accept"] = "*/*"
@@ -196,21 +247,14 @@ class EmailOtpLoginClient:
             allow_redirects=True,
             verify=False,
         )
-        if resp is None or resp.status_code not in (200, 202, 204, 302):
-            body = str(getattr(resp, "text", "") or "")[:500] if resp is not None else ""
-            raise RuntimeError(error or f"send_otp_http_{getattr(resp, 'status_code', 'unknown')}_body={body}")
-        if _is_cloudflare_challenge(resp):
-            raise RuntimeError("发送验证码被 Cloudflare 拦截，请更换 IP 重试")
-        final_url = str(getattr(resp, "url", "") or "")
-        self._raise_for_error_redirect(final_url)
+        return self._handle_send_otp_response(resp, error, "send_otp")
 
-        data = _response_json(resp)
-        if isinstance(data, dict):
-            error_value = data.get("error") or data.get("errorCode") or data.get("error_code")
-            if error_value:
-                raise RuntimeError(f"send_otp_error: {json.dumps(data, ensure_ascii=False)[:500]}")
-
-        return f"HTTP {resp.status_code}"
+    def _send_otp(self) -> str:
+        if self.passwordless_login_url:
+            return self._send_passwordless_otp()
+        if self.email_verification_url:
+            return self._send_email_otp()
+        raise RuntimeError("OpenAI 未进入邮箱验证码或一次性验证码登录步骤，无法发送验证码")
 
     def _validate_otp(self, code: str) -> tuple[dict[str, Any], str]:
         headers = self._json_headers(self._otp_referer())
