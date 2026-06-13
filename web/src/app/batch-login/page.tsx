@@ -82,6 +82,7 @@ function BatchLoginPageContent() {
   const [apiBase, setApiBase] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const [customPassword, setCustomPassword] = useState("");
+  const [proxy, setProxy] = useState("");
   const [job, setJob] = useState<BatchLoginJob | null>(null);
   const [activeJobId, setActiveJobId] = useState("");
   const [isStarting, setIsStarting] = useState(false);
@@ -96,6 +97,8 @@ function BatchLoginPageContent() {
       try {
         const data = await fetchRegisterConfig();
         if (closed) return;
+        const savedProxy = String(data.register.proxy || "");
+        setProxy((current) => current || savedProxy);
         const provider = findCloudflareTempEmailProvider(data.register);
         if (!provider) return;
         const savedApiBase = String(provider.api_base || "");
@@ -182,7 +185,10 @@ function BatchLoginPageContent() {
     try {
       const data = await startBatchLogin(
         emails,
-        hasMailConfig ? cloudflareTempEmail : undefined,
+        {
+          ...(hasMailConfig ? { cloudflareTempEmail } : {}),
+          proxy: proxy.trim(),
+        },
       );
       setJob(data.job);
       setActiveJobId(data.job.job_id);
@@ -237,6 +243,16 @@ function BatchLoginPageContent() {
               </div>
             </div>
             <div className="grid gap-3">
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">登录代理</label>
+                <Input
+                  value={proxy}
+                  onChange={(event) => setProxy(event.target.value)}
+                  placeholder="http://127.0.0.1:7890"
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                  disabled={isRunning || isStarting}
+                />
+              </div>
               <div className="space-y-2">
                 <label className="text-sm text-stone-700">API Base</label>
                 <Input

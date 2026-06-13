@@ -62,6 +62,7 @@ class AccountRefreshRequest(BaseModel):
 class BatchLoginRequest(BaseModel):
     emails: list[str] = Field(default_factory=list)
     cloudflare_temp_email: dict[str, Any] | None = None
+    proxy: str | None = None
 
 
 class AccountExportRequest(BaseModel):
@@ -314,7 +315,7 @@ def create_router() -> APIRouter:
     async def start_batch_login(body: BatchLoginRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
-            job = await run_in_threadpool(batch_login_service.start, body.emails, body.cloudflare_temp_email)
+            job = await run_in_threadpool(batch_login_service.start, body.emails, body.cloudflare_temp_email, body.proxy)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         return {"job": job}

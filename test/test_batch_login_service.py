@@ -19,6 +19,8 @@ class FakeRegisterService:
     def update(self, updates: dict) -> dict:
         self.updates.append(copy.deepcopy(updates))
         self.config.update(copy.deepcopy(updates))
+        if "proxy" in updates and isinstance(self.config.get("mail"), dict):
+            self.config["mail"]["proxy"] = str(self.config.get("proxy") or "").strip()
         return self.get()
 
 
@@ -129,6 +131,91 @@ class BatchLoginServiceTests(unittest.TestCase):
             self.assertEqual(providers[1]["admin_password"], "admin-secret")
             self.assertEqual(providers[1]["custom_password"], "")
             self.assertEqual(providers[1]["domain"], [])
+
+        self.with_register_service(fake, run_test)
+
+    def test_start_uses_and_saves_proxy_override(self) -> None:
+        fake = FakeRegisterService(
+            {
+                "proxy": "http://old.example.com:7890",
+                "mail": {
+                    "request_timeout": 30,
+                    "wait_timeout": 120,
+                    "wait_interval": 3,
+                    "proxy": "http://old.example.com:7890",
+                    "providers": [
+                        {
+                            "type": "cloudflare_temp_email",
+                            "enable": True,
+                            "api_base": "https://worker.example.com",
+                            "admin_password": "admin-secret",
+                            "custom_password": "",
+                            "domain": [],
+                        }
+                    ],
+                },
+            }
+        )
+
+        def run_test() -> None:
+            service = BatchLoginService()
+            captured: dict = {}
+            completed = threading.Event()
+
+            def fake_run(job_id, emails, mail_config, proxy):
+                captured.update({"mail_config": mail_config, "proxy": proxy})
+                completed.set()
+
+            service._run = fake_run
+            service.start(["user@example.com"], None, " http://127.0.0.1:7890 ")
+
+            self.assertTrue(completed.wait(1.0))
+            self.assertEqual(captured["proxy"], "http://127.0.0.1:7890")
+            self.assertEqual(captured["mail_config"]["proxy"], "http://127.0.0.1:7890")
+            self.assertEqual(fake.config["proxy"], "http://127.0.0.1:7890")
+
+        self.with_register_service(fake, run_test)
+
+    def test_start_empty_proxy_override_clears_saved_proxy(self) -> None:
+        fake = FakeRegisterService(
+            {
+                "proxy": "http://old.example.com:7890",
+                "mail": {
+                    "request_timeout": 30,
+                    "wait_timeout": 120,
+                    "wait_interval": 3,
+                    "proxy": "http://old.example.com:7890",
+                    "providers": [
+                        {
+                            "type": "cloudflare_temp_email",
+                            "enable": True,
+                            "api_base": "https://worker.example.com",
+                            "admin_password": "admin-secret",
+                            "custom_password": "",
+                            "domain": [],
+                        }
+                    ],
+                },
+            }
+        )
+
+        def run_test() -> None:
+            service = BatchLoginService()
+            captured: dict = {}
+            completed = threading.Event()
+
+            def fake_run(job_id, emails, mail_config, proxy):
+                captured.update({"mail_config": mail_config, "proxy": proxy})
+                completed.set()
+
+            service._run = fake_run
+            service.start(["user@example.com"], None, "")
+
+            self.assertTrue(completed.wait(1.0))
+            self.assertEqual(captured["proxy"], "")
+            self.assertEqual(captured["mail_config"]["proxy"], "")
+            self.assertEqual(fake.config["proxy"], "")
+            self.assertEqual(fake.config["mail"]["proxy"], "")
 
         self.with_register_service(fake, run_test)
 

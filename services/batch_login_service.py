@@ -417,7 +417,11 @@ class BatchLoginService:
 
         register_service.update({"mail": {**raw_mail, "providers": providers}})
 
-    def _load_cloudflare_mail_config(self, mail_options: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
+    def _load_cloudflare_mail_config(
+        self,
+        mail_options: dict[str, Any] | None = None,
+        proxy_override: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
         cfg = register_service.get()
         raw_mail = cfg.get("mail") if isinstance(cfg.get("mail"), dict) else {}
         option_provider = self._cloudflare_provider_from_options(raw_mail, mail_options)
@@ -440,20 +444,28 @@ class BatchLoginService:
             if not self._clean(provider.get("admin_password")):
                 raise ValueError(f"cloudflare_temp_email#{index} 缺少 Admin Password")
 
-        proxy = str(cfg.get("proxy") or "").strip()
+        has_proxy_override = proxy_override is not None
+        proxy = self._clean(proxy_override) if has_proxy_override else self._clean(cfg.get("proxy"))
         mail_config = {
             **raw_mail,
             "providers": providers,
-            "proxy": proxy or str(raw_mail.get("proxy") or "").strip(),
+            "proxy": proxy if has_proxy_override else proxy or str(raw_mail.get("proxy") or "").strip(),
         }
         return mail_config, proxy
 
-    def start(self, emails: list[str], mail_options: dict[str, Any] | None = None) -> dict[str, Any]:
+    def start(
+        self,
+        emails: list[str],
+        mail_options: dict[str, Any] | None = None,
+        proxy: str | None = None,
+    ) -> dict[str, Any]:
         normalized_emails = _normalize_emails(emails)
         if not normalized_emails:
             raise ValueError("邮箱列表不能为空")
-        mail_config, proxy = self._load_cloudflare_mail_config(mail_options)
+        mail_config, resolved_proxy = self._load_cloudflare_mail_config(mail_options, proxy)
         self._save_cloudflare_mail_options(mail_options)
+        if proxy is not None:
+            register_service.update({"proxy": resolved_proxy})
         job_id = uuid.uuid4().hex
         job = {
             "job_id": job_id,
@@ -477,7 +489,7 @@ class BatchLoginService:
 
         runner = threading.Thread(
             target=self._run,
-            args=(job_id, normalized_emails, mail_config, proxy),
+            args=(job_id, normalized_emails, mail_config, resolved_proxy),
             daemon=True,
             name=f"batch-login-{job_id[:8]}",
         )

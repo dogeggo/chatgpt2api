@@ -134,6 +134,11 @@ export type BatchLoginCloudflareTempEmail = {
   custom_password?: string;
 };
 
+export type BatchLoginOptions = {
+  cloudflareTempEmail?: BatchLoginCloudflareTempEmail;
+  proxy?: string;
+};
+
 type AccountUpdateResponse = {
   item: Account;
   items: Account[];
@@ -417,12 +422,13 @@ export async function fetchReLoginProgress(progressId: string) {
   return httpRequest<RefreshProgressResponse>(`/api/accounts/re-login/progress/${progressId}`);
 }
 
-export async function startBatchLogin(emails: string[], cloudflareTempEmail?: BatchLoginCloudflareTempEmail) {
+export async function startBatchLogin(emails: string[], options?: BatchLoginOptions) {
   return httpRequest<{ job: BatchLoginJob }>("/api/accounts/batch-login", {
     method: "POST",
     body: {
       emails,
-      ...(cloudflareTempEmail ? { cloudflare_temp_email: cloudflareTempEmail } : {}),
+      ...(options?.cloudflareTempEmail ? { cloudflare_temp_email: options.cloudflareTempEmail } : {}),
+      ...(options && "proxy" in options ? { proxy: options.proxy ?? "" } : {}),
     },
   });
 }
