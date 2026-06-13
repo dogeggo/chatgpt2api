@@ -193,14 +193,53 @@ def _response_debug_detail(resp, limit: int = 800) -> str:
 def _is_cloudflare_challenge(resp) -> bool:
     if resp is None:
         return False
-    text = str(getattr(resp, "text", "") or "").lower()
     headers = getattr(resp, "headers", {}) or {}
-    server = str(headers.get("server") or "").lower()
-    return (
-        "cloudflare" in server
-        or "challenges.cloudflare.com" in text
-        or "<title>just a moment" in text
+    header_items = {
+        str(key).lower(): str(value)
+        for key, value in getattr(headers, "items", lambda: [])()
+    }
+    text = str(getattr(resp, "text", "") or "").lower()
+    server = str(headers.get("server") or header_items.get("server") or "").lower()
+    content_type = str(
+        headers.get("content-type") or header_items.get("content-type") or ""
+    ).lower()
+    cf_mitigated = str(
+        headers.get("cf-mitigated") or header_items.get("cf-mitigated") or ""
+    ).lower()
+    try:
+        status_code = int(getattr(resp, "status_code", 0) or 0)
+    except Exception:
+        status_code = 0
+
+    if cf_mitigated == "challenge":
+        return True
+
+    challenge_markers = (
+        "challenges.cloudflare.com",
+        "/cdn-cgi/challenge-platform/",
+        "cf-chl-",
+        "<title>just a moment",
+        "checking if the site connection is secure",
+        "verify you are human",
     )
+    if any(marker in text for marker in challenge_markers):
+        return True
+
+    if (
+        status_code in (403, 429, 503)
+        and "cloudflare" in server
+        and "text/html" in content_type
+    ):
+        block_markers = (
+            "attention required",
+            "cloudflare ray id",
+            "access denied",
+            "please enable cookies",
+            "ddos protection by cloudflare",
+        )
+        return any(marker in text for marker in block_markers)
+
+    return False
 
 
 def create_mailbox(username: str | None = None) -> dict:
